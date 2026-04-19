@@ -133,7 +133,7 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
 
         var analysisCmd = connection.CreateCommand();
         analysisCmd.CommandText = """
-            SELECT ImageId, OverallScore, SharpnessScore, ExposureScore, EyesClosed, IsDuplicate, IsAnalyzed, FaceCount, PersonLabel, StyleLabel, ColorLabel, DominantColorsJson, AutoClass, IsWaste, WasteReason, Rating, IsPicked, RawJson
+            SELECT ImageId, OverallScore, SharpnessScore, ExposureScore, EyesClosed, IsDuplicate, IsAnalyzed, FaceCount, PersonLabel, StyleLabel, ColorLabel, DominantColorsJson, AutoClass, IsWaste, WasteReason, Rating, IsPicked, RotationQuarterTurns, RawJson
             FROM Analysis;
             """;
         await using (var reader = await analysisCmd.ExecuteReaderAsync(cancellationToken))
@@ -164,7 +164,8 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
                     WasteReason = reader.IsDBNull(14) ? string.Empty : reader.GetString(14),
                     Rating = reader.IsDBNull(15) ? 0 : reader.GetInt32(15),
                     IsPicked = !reader.IsDBNull(16) && reader.GetInt32(16) == 1,
-                    RawJson = reader.IsDBNull(17) ? string.Empty : reader.GetString(17)
+                    RotationQuarterTurns = reader.IsDBNull(17) ? 0 : NormalizeQuarterTurns(reader.GetInt32(17)),
+                    RawJson = reader.IsDBNull(18) ? string.Empty : reader.GetString(18)
                 };
             }
         }
@@ -251,8 +252,8 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
         var cmd = connection.CreateCommand();
         cmd.Transaction = (SqliteTransaction)tx;
         cmd.CommandText = """
-            INSERT INTO Analysis(ImageId, OverallScore, SharpnessScore, ExposureScore, EyesClosed, IsDuplicate, IsAnalyzed, FaceCount, PersonLabel, StyleLabel, ColorLabel, DominantColorsJson, AutoClass, IsWaste, WasteReason, Rating, IsPicked, RawJson)
-            VALUES ($id, $overall, $sharpness, $exposure, $eyesClosed, $duplicate, $isAnalyzed, $faceCount, $personLabel, $styleLabel, $colorLabel, $dominantColorsJson, $autoClass, $isWaste, $wasteReason, $rating, $isPicked, $rawJson)
+            INSERT INTO Analysis(ImageId, OverallScore, SharpnessScore, ExposureScore, EyesClosed, IsDuplicate, IsAnalyzed, FaceCount, PersonLabel, StyleLabel, ColorLabel, DominantColorsJson, AutoClass, IsWaste, WasteReason, Rating, IsPicked, RotationQuarterTurns, RawJson)
+            VALUES ($id, $overall, $sharpness, $exposure, $eyesClosed, $duplicate, $isAnalyzed, $faceCount, $personLabel, $styleLabel, $colorLabel, $dominantColorsJson, $autoClass, $isWaste, $wasteReason, $rating, $isPicked, $rotationQuarterTurns, $rawJson)
             ON CONFLICT(ImageId) DO UPDATE SET
                 OverallScore = excluded.OverallScore,
                 SharpnessScore = excluded.SharpnessScore,
@@ -270,6 +271,7 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
                 WasteReason = excluded.WasteReason,
                 Rating = excluded.Rating,
                 IsPicked = excluded.IsPicked,
+                RotationQuarterTurns = excluded.RotationQuarterTurns,
                 RawJson = excluded.RawJson;
             """;
         cmd.Parameters.AddWithValue("$id", photo.Id.ToString());
@@ -289,6 +291,7 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
         cmd.Parameters.AddWithValue("$wasteReason", photo.Analysis.WasteReason);
         cmd.Parameters.AddWithValue("$rating", photo.Analysis.Rating);
         cmd.Parameters.AddWithValue("$isPicked", photo.Analysis.IsPicked ? 1 : 0);
+        cmd.Parameters.AddWithValue("$rotationQuarterTurns", NormalizeQuarterTurns(photo.Analysis.RotationQuarterTurns));
         cmd.Parameters.AddWithValue("$rawJson", photo.Analysis.RawJson);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
 
@@ -358,6 +361,8 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
                 IsWaste INTEGER,
                 WasteReason TEXT,
                 Rating INTEGER,
+                IsPicked INTEGER,
+                RotationQuarterTurns INTEGER,
                 RawJson TEXT,
                 FOREIGN KEY(ImageId) REFERENCES Image(Id) ON DELETE CASCADE
             );
@@ -394,6 +399,7 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
         EnsureColumn(connection, "Analysis", "WasteReason", "TEXT");
         EnsureColumn(connection, "Analysis", "Rating", "INTEGER");
         EnsureColumn(connection, "Analysis", "IsPicked", "INTEGER");
+        EnsureColumn(connection, "Analysis", "RotationQuarterTurns", "INTEGER");
     }
 
     private static void EnsureColumn(SqliteConnection connection, string table, string column, string columnType)
@@ -473,6 +479,12 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
         {
             return new List<string>();
         }
+    }
+
+    private static int NormalizeQuarterTurns(int turns)
+    {
+        var normalized = turns % 4;
+        return normalized < 0 ? normalized + 4 : normalized;
     }
 }
 

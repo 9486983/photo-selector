@@ -1,13 +1,14 @@
 ﻿using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Windows.Media.Imaging;
+using PhotoSelector.App.Services;
 using PhotoSelector.Domain.Models;
 
 namespace PhotoSelector.App.ViewModels;
 
 public sealed class PhotoRow(PhotoItem photo) : INotifyPropertyChanged
 {
-    private BitmapImage? _thumbnail;
+    private BitmapSource? _thumbnail;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -31,7 +32,7 @@ public sealed class PhotoRow(PhotoItem photo) : INotifyPropertyChanged
     public string WasteReason => Photo.Analysis.WasteReason;
     public int Rating => Photo.Analysis.Rating;
     public bool IsPicked => Photo.Analysis.IsPicked;
-    public BitmapImage? Thumbnail => _thumbnail ??= LoadBitmap(240);
+    public BitmapSource? Thumbnail => _thumbnail ??= LoadBitmap(240);
     public string Color1 => GetColorAt(0);
     public string Color2 => GetColorAt(1);
     public string Color3 => GetColorAt(2);
@@ -69,6 +70,7 @@ public sealed class PhotoRow(PhotoItem photo) : INotifyPropertyChanged
         OnPropertyChanged(nameof(Color3));
         OnPropertyChanged(nameof(Color4));
         OnPropertyChanged(nameof(Color5));
+        OnPropertyChanged(nameof(Thumbnail));
     }
 
     private string ResolvePersonName()
@@ -92,19 +94,15 @@ public sealed class PhotoRow(PhotoItem photo) : INotifyPropertyChanged
         return Photo.Analysis.DominantColors[index] ?? string.Empty;
     }
 
-    private BitmapImage? LoadBitmap(int decodePixelWidth)
+    private BitmapSource? LoadBitmap(int decodePixelWidth)
     {
         try
         {
             var sourcePath = string.IsNullOrWhiteSpace(Photo.ThumbnailPath) ? Path : Photo.ThumbnailPath;
-            var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.DecodePixelWidth = decodePixelWidth;
-            bitmap.UriSource = new Uri(sourcePath, UriKind.Absolute);
-            bitmap.EndInit();
-            bitmap.Freeze();
-            return bitmap;
+            return ImageDisplayService.LoadBitmap(
+                sourcePath,
+                decodePixelWidth,
+                Photo.Analysis.RotationQuarterTurns);
         }
         catch
         {

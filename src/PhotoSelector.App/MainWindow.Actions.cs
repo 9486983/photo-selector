@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -8,6 +8,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using PhotoSelector.App.Services;
 using PhotoSelector.App.ViewModels;
 using PhotoSelector.Domain.Models;
 using PhotoSelector.Domain.Rules;
@@ -467,13 +468,9 @@ public partial class MainWindow
 
         try
         {
-            var previewPath = string.IsNullOrWhiteSpace(row.Photo.ThumbnailPath) ? row.Path : row.Photo.ThumbnailPath;
-            var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.UriSource = new Uri(previewPath, UriKind.Absolute);
-            bitmap.EndInit();
-            PreviewImage.Source = bitmap;
+            PreviewImage.Source =
+                ImageDisplayService.LoadBitmap(row.Path, 960, row.Photo.Analysis.RotationQuarterTurns)
+                ?? ImageDisplayService.LoadBitmap(row.Photo.ThumbnailPath, 960, row.Photo.Analysis.RotationQuarterTurns);
         }
         catch
         {
@@ -668,6 +665,23 @@ public partial class MainWindow
         await SaveStateAsync();
         RebuildGroups();
         ApplyFilters();
+    }
+
+    private async Task RotatePhotoAsync(PhotoRow row, int quarterTurnDelta)
+    {
+        row.Photo.Analysis.RotationQuarterTurns = NormalizeQuarterTurns(
+            row.Photo.Analysis.RotationQuarterTurns + quarterTurnDelta);
+        row.Refresh();
+
+        if (ReferenceEquals(PhotoList.SelectedItem, row))
+        {
+            PhotoList_OnSelectionChanged(PhotoList, new SelectionChangedEventArgs(
+                Selector.SelectionChangedEvent,
+                Array.Empty<object>(),
+                new[] { row }));
+        }
+
+        await SaveStateAsync();
     }
 
     private async Task AssignPersonAsync(PhotoRow row, string newName)
@@ -924,9 +938,38 @@ public partial class MainWindow
         menu.Items.Add(portraitItem);
 
         menu.Items.Add(new Separator());
+        var rotateLeft = new MenuItem { Header = "左转 90°", CommandParameter = row };
+        rotateLeft.Click += RotateLeft_OnClick;
+        menu.Items.Add(rotateLeft);
+
+        var rotateRight = new MenuItem { Header = "右转 90°", CommandParameter = row };
+        rotateRight.Click += RotateRight_OnClick;
+        menu.Items.Add(rotateRight);
+
+        menu.Items.Add(new Separator());
         var reanalyze = new MenuItem { Header = "重新分析", CommandParameter = row };
         reanalyze.Click += Reanalyze_OnClick;
         menu.Items.Add(reanalyze);
+    }
+
+    private async void RotateLeft_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (GetRowFromMenu(sender) is not { } row)
+        {
+            return;
+        }
+
+        await RotatePhotoAsync(row, -1);
+    }
+
+    private async void RotateRight_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (GetRowFromMenu(sender) is not { } row)
+        {
+            return;
+        }
+
+        await RotatePhotoAsync(row, 1);
     }
 
     private void BuildPersonMenu(ContextMenu menu, PhotoRow row)
@@ -1028,8 +1071,17 @@ public partial class MainWindow
             RebuildGroups();
             ApplyFilters();
             _ = SaveStateAsync();
+        }, (target, quarterTurnDelta) =>
+        {
+            _ = RotatePhotoAsync(target, quarterTurnDelta);
         })
         { Owner = this };
         preview.ShowDialog();
+    }
+
+    private static int NormalizeQuarterTurns(int turns)
+    {
+        var normalized = turns % 4;
+        return normalized < 0 ? normalized + 4 : normalized;
     }
 }

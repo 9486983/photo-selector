@@ -61,6 +61,10 @@
 
                 <Button Name="PrevButton" Content=" 上一张 " HorizontalAlignment="Left" VerticalAlignment="Center" Margin="12" Click="PrevButton_OnClick" Style="{StaticResource NavHoverButton}"/>
                 <Button Name="NextButton" Content=" 下一张 " HorizontalAlignment="Right" VerticalAlignment="Center" Margin="12" Click="NextButton_OnClick" Style="{StaticResource NavHoverButton}"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,16,16,0">
+                    <Button Name="RotateLeftButton" Content="左转 90°" Margin="0,0,8,0" Click="RotateLeftButton_OnClick" Style="{StaticResource NavHoverButton}"/>
+                    <Button Name="RotateRightButton" Content="右转 90°" Click="RotateRightButton_OnClick" Style="{StaticResource NavHoverButton}"/>
+                </StackPanel>
 
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="16,0,0,16">
                     <Button Name="Star1" Margin="0,0,2,0" Tag="1" Click="StarButton_OnClick" Content="☆" Style="{StaticResource PreviewStarButton}"/>

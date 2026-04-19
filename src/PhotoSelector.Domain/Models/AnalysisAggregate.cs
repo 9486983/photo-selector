@@ -18,6 +18,7 @@ public sealed class AnalysisAggregate
     public string WasteReason { get; set; } = string.Empty;
     public int Rating { get; set; }
     public bool IsPicked { get; set; }
+    public int RotationQuarterTurns { get; set; }
     public List<PluginResult> PluginResults { get; set; } = new();
     public string RawJson { get; set; } = string.Empty;
 }

@@ -154,13 +154,11 @@ public sealed class ThumbnailCacheService
     {
         try
         {
-            var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.DecodePixelWidth = maxSide;
-            bitmap.UriSource = new Uri(sourcePath, UriKind.Absolute);
-            bitmap.EndInit();
-            bitmap.Freeze();
+            var bitmap = ImageDisplayService.LoadBitmap(sourcePath, maxSide);
+            if (bitmap is null)
+            {
+                return false;
+            }
 
             var encoder = new JpegBitmapEncoder();
             encoder.QualityLevel = 82;

@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS Analysis (
     WasteReason TEXT,
     Rating INTEGER,
     IsPicked INTEGER,
+    RotationQuarterTurns INTEGER,
     RawJson TEXT,
     FOREIGN KEY(ImageId) REFERENCES Image(Id) ON DELETE CASCADE
 );

@@ -1,8 +1,8 @@
-﻿using PhotoSelector.App.ViewModels;
+﻿using PhotoSelector.App.Services;
+using PhotoSelector.App.ViewModels;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Media.Imaging;
 
 namespace PhotoSelector.App;
 
@@ -10,16 +10,22 @@ public partial class PreviewWindow : Window
 {
     private readonly IReadOnlyList<PhotoRow> _rows;
     private readonly Action<PhotoRow, int>? _setRating;
+    private readonly Action<PhotoRow, int>? _rotatePhoto;
     private bool _isDragging;
     private System.Windows.Point _lastPoint;
     private int _index;
 
-    public PreviewWindow(IReadOnlyList<PhotoRow> rows, int index, Action<PhotoRow, int>? setRating = null)
+    public PreviewWindow(
+        IReadOnlyList<PhotoRow> rows,
+        int index,
+        Action<PhotoRow, int>? setRating = null,
+        Action<PhotoRow, int>? rotatePhoto = null)
     {
         InitializeComponent();
         _rows = rows;
         _index = Math.Clamp(index, 0, Math.Max(0, rows.Count - 1));
         _setRating = setRating;
+        _rotatePhoto = rotatePhoto;
         Focus();
         RenderCurrent();
     }
@@ -35,19 +41,10 @@ public partial class PreviewWindow : Window
             return;
         }
 
-        try
-        {
-            var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.UriSource = new Uri(row.Path, UriKind.Absolute);
-            bitmap.EndInit();
-            PreviewImage.Source = bitmap;
-        }
-        catch
-        {
-            PreviewImage.Source = null;
-        }
+        PreviewImage.Source = ImageDisplayService.LoadBitmap(
+            row.Path,
+            decodePixelWidth: null,
+            row.Photo.Analysis.RotationQuarterTurns);
 
         UpdateColorDots(row.Photo.Analysis.DominantColors);
         UpdateStars(row.Rating);
@@ -127,6 +124,27 @@ public partial class PreviewWindow : Window
 
         _setRating?.Invoke(Current, rating);
         UpdateStars(rating);
+    }
+
+    private void RotateLeftButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        RotateCurrent(-1);
+    }
+
+    private void RotateRightButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        RotateCurrent(1);
+    }
+
+    private void RotateCurrent(int quarterTurns)
+    {
+        if (Current is null)
+        {
+            return;
+        }
+
+        _rotatePhoto?.Invoke(Current, quarterTurns);
+        RenderCurrent();
     }
 
     private void PreviewImage_OnMouseWheel(object sender, MouseWheelEventArgs e)
@@ -214,6 +232,18 @@ public partial class PreviewWindow : Window
         if (e.Key == Key.Right)
         {
             NextButton_OnClick(this, new RoutedEventArgs());
+            return;
+        }
+
+        if (e.Key == Key.Q)
+        {
+            RotateCurrent(-1);
+            return;
+        }
+
+        if (e.Key == Key.E)
+        {
+            RotateCurrent(1);
             return;
         }
 
