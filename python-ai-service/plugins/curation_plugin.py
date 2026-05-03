@@ -32,14 +32,11 @@ class CurationPlugin(BasePlugin):
             style_label = "neutral"
 
         tone_label = "bright" if mean_v > 172 else "dark" if mean_v < 70 else "normal"
-        style_score = 0.6 if style_label == "low_saturation" else 0.75 if style_label == "neutral" else 0.85
-        tone_bonus = 0.08 if tone_label == "normal" else 0.0
-        score = min(1.0, max(0.0, style_score + tone_bonus))
         color_label, dominant_colors = self._extract_dominant_colors(image)
 
         return PluginOutput(
             plugin_name=self.name,
-            score=round(score, 4),
+            score=0.0,
             features={
                 "style_label": style_label,
                 "tone_label": tone_label,

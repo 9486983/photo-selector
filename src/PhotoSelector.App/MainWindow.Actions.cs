@@ -775,7 +775,7 @@ public partial class MainWindow
         Directory.CreateDirectory(jpgFolder);
         Directory.CreateDirectory(rawFolder);
 
-        var selected = _rows.Where(r => r.Photo.Analysis.IsPicked).ToList();
+        var selected = GetLibraryScopedRows().Where(r => r.Photo.Analysis.IsPicked).ToList();
         if (selected.Count == 0)
         {
             StatusText.Text = "没有已选中的照片";

@@ -16,6 +16,8 @@ public sealed class AnalysisAggregate
     public string AutoClass { get; set; } = "unknown";
     public bool IsWaste { get; set; }
     public string WasteReason { get; set; } = string.Empty;
+    public float CompositionScore { get; set; }
+    public float ExposureQuality { get; set; }
     public int Rating { get; set; }
     public bool IsPicked { get; set; }
     public int RotationQuarterTurns { get; set; }

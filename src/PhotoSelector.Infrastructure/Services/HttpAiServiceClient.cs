@@ -1,4 +1,4 @@
-﻿using PhotoSelector.Application.Interfaces;
+using PhotoSelector.Application.Interfaces;
 using PhotoSelector.Domain.Models;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -7,15 +7,46 @@ namespace PhotoSelector.Infrastructure.Services;
 
 public sealed class HttpAiServiceClient(HttpClient httpClient) : IAiServiceClient
 {
+    private const int MaxRetries = 3;
+    private const int RetryBaseDelayMs = 1000;
+
     public async Task<AnalyzeResponse> AnalyzeAsync(string imagePath, CancellationToken cancellationToken = default)
     {
         var payload = new { image_path = imagePath };
-        using var response = await httpClient.PostAsJsonAsync("/analyze", payload, cancellationToken);
-        response.EnsureSuccessStatusCode();
 
-        var json = await response.Content.ReadAsStringAsync(cancellationToken);
-        var root = JsonSerializer.Deserialize<JsonElement>(json);
-        return ParseAnalyzeResponse(root, json);
+        for (var attempt = 0; attempt <= MaxRetries; attempt++)
+        {
+            try
+            {
+                using var response = await httpClient.PostAsJsonAsync("/analyze", payload, cancellationToken);
+                response.EnsureSuccessStatusCode();
+
+                var json = await response.Content.ReadAsStringAsync(cancellationToken);
+                var root = JsonSerializer.Deserialize<JsonElement>(json);
+                return ParseAnalyzeResponse(root, json);
+            }
+            catch (Exception ex) when (attempt < MaxRetries && IsRetryable(ex))
+            {
+                var delay = (int)(RetryBaseDelayMs * Math.Pow(2, attempt)) + Random.Shared.Next(0, 200);
+                System.Diagnostics.Debug.WriteLine(
+                    $"[HttpAiServiceClient] Analyze attempt {attempt + 1}/{MaxRetries} failed for {imagePath}: {ex.Message}. Retrying in {delay}ms");
+                await Task.Delay(delay, cancellationToken);
+            }
+            catch (HttpRequestException ex) when (attempt < MaxRetries)
+            {
+                var delay = (int)(RetryBaseDelayMs * Math.Pow(2, attempt)) + Random.Shared.Next(0, 200);
+                System.Diagnostics.Debug.WriteLine(
+                    $"[HttpAiServiceClient] HTTP error attempt {attempt + 1}/{MaxRetries} for {imagePath}: {ex.Message}. Retrying in {delay}ms");
+                await Task.Delay(delay, cancellationToken);
+            }
+        }
+
+        // Final attempt - let exceptions propagate
+        using var finalResponse = await httpClient.PostAsJsonAsync("/analyze", payload, cancellationToken);
+        finalResponse.EnsureSuccessStatusCode();
+        var finalJson = await finalResponse.Content.ReadAsStringAsync(cancellationToken);
+        var finalRoot = JsonSerializer.Deserialize<JsonElement>(finalJson);
+        return ParseAnalyzeResponse(finalRoot, finalJson);
     }
 
     public async Task<IReadOnlyCollection<(string ImagePath, AnalyzeResponse Response)>> AnalyzeBatchAsync(
@@ -23,38 +54,68 @@ public sealed class HttpAiServiceClient(HttpClient httpClient) : IAiServiceClien
         CancellationToken cancellationToken = default)
     {
         var payload = new { image_paths = imagePaths.ToArray() };
-        using var response = await httpClient.PostAsJsonAsync("/analyze/batch", payload, cancellationToken);
-        if (!response.IsSuccessStatusCode)
+
+        for (var attempt = 0; attempt <= MaxRetries; attempt++)
         {
-            var fallback = new List<(string, AnalyzeResponse)>();
-            foreach (var imagePath in imagePaths)
+            try
             {
-                fallback.Add((imagePath, await AnalyzeAsync(imagePath, cancellationToken)));
-            }
-
-            return fallback;
-        }
-
-        var json = await response.Content.ReadAsStringAsync(cancellationToken);
-        var root = JsonSerializer.Deserialize<JsonElement>(json);
-        var result = new List<(string, AnalyzeResponse)>();
-
-        if (root.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in items.EnumerateArray())
-            {
-                if (!item.TryGetProperty("image_path", out var pathNode))
+                using var response = await httpClient.PostAsJsonAsync("/analyze/batch", payload, cancellationToken);
+                if (!response.IsSuccessStatusCode)
                 {
-                    continue;
+                    return await FallbackToIndividualAsync(imagePaths, cancellationToken);
                 }
 
-                var path = pathNode.GetString() ?? string.Empty;
-                result.Add((path, ParseAnalyzeResponse(item, item.GetRawText())));
+                var json = await response.Content.ReadAsStringAsync(cancellationToken);
+                var root = JsonSerializer.Deserialize<JsonElement>(json);
+                var result = new List<(string, AnalyzeResponse)>();
+
+                if (root.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var item in items.EnumerateArray())
+                    {
+                        if (!item.TryGetProperty("image_path", out var pathNode))
+                        {
+                            continue;
+                        }
+
+                        var path = pathNode.GetString() ?? string.Empty;
+                        result.Add((path, ParseAnalyzeResponse(item, item.GetRawText())));
+                    }
+                }
+
+                return result;
             }
+            catch (Exception ex) when (attempt < MaxRetries && IsRetryable(ex))
+            {
+                var delay = (int)(RetryBaseDelayMs * Math.Pow(2, attempt)) + Random.Shared.Next(0, 200);
+                System.Diagnostics.Debug.WriteLine(
+                    $"[HttpAiServiceClient] Batch attempt {attempt + 1}/{MaxRetries} failed: {ex.Message}. Retrying in {delay}ms");
+                await Task.Delay(delay, cancellationToken);
+            }
+        }
+
+        return await FallbackToIndividualAsync(imagePaths, cancellationToken);
+    }
+
+    private async Task<IReadOnlyCollection<(string, AnalyzeResponse)>> FallbackToIndividualAsync(
+        IReadOnlyCollection<string> imagePaths,
+        CancellationToken cancellationToken)
+    {
+        var result = new List<(string, AnalyzeResponse)>();
+        foreach (var imagePath in imagePaths)
+        {
+            result.Add((imagePath, await AnalyzeAsync(imagePath, cancellationToken)));
         }
 
         return result;
     }
+
+    private static bool IsRetryable(Exception ex) => ex switch
+    {
+        HttpRequestException => true,
+        TaskCanceledException => true,
+        _ => false,
+    };
 
     private static AnalyzeResponse ParseAnalyzeResponse(JsonElement root, string rawJson)
     {
@@ -72,6 +133,8 @@ public sealed class HttpAiServiceClient(HttpClient httpClient) : IAiServiceClien
             AutoClass = root.TryGetProperty("auto_class", out var autoClass) ? autoClass.GetString() ?? "unknown" : "unknown",
             IsWaste = root.TryGetProperty("is_waste", out var isWaste) && isWaste.GetBoolean(),
             WasteReason = root.TryGetProperty("waste_reason", out var wasteReason) ? wasteReason.GetString() ?? string.Empty : string.Empty,
+            CompositionScore = root.TryGetProperty("composition_score", out var composition) ? composition.GetSingle() : 0,
+            ExposureQuality = root.TryGetProperty("exposure_quality", out var exposureQ) ? exposureQ.GetSingle() : 0,
             RawJson = rawJson
         };
 

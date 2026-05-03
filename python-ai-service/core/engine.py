@@ -4,46 +4,37 @@ import asyncio
 import importlib
 import inspect
 import json
+import logging
 import pkgutil
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+from core.config import EngineConfig, load_config
 from core.plugin_base import BasePlugin, PluginOutput
 from core.scheduler import GpuCpuScheduler
 
+logger = logging.getLogger(__name__)
+
 
 class AIEngine:
-    def __init__(
-        self,
-        gpu_workers: int = 1,
-        cpu_workers: int = 4,
-        batch_parallelism: int = 6,
-        score_weights: dict | None = None,
-        waste_thresholds: dict | None = None,
-    ) -> None:
+    def __init__(self, config: EngineConfig | None = None) -> None:
+        self.config = config or load_config()
         self.plugins: list[BasePlugin] = []
-        self.scheduler = GpuCpuScheduler(gpu_workers=gpu_workers, cpu_workers=cpu_workers)
-        self.batch_parallelism = max(1, batch_parallelism)
+
+        self.scheduler = GpuCpuScheduler(
+            gpu_workers=self.config.gpu_workers if self.config.gpu_enabled else 0,
+            cpu_workers=self.config.cpu_workers,
+        )
+        self.batch_parallelism = max(1, self.config.batch_parallelism)
+
+        self.score_weights = dict(self.config.score_weights)
+        self.waste_thresholds = dict(self.config.waste_thresholds)
+
         self.state_path = Path(__file__).resolve().parent.parent / "data" / "learning_state.json"
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.score_weights = score_weights or {
-            "sharpness": 0.32,
-            "exposure": 0.24,
-            "object": 0.20,
-            "person": 0.18,
-            "style": 0.06,
-        }
-        self.waste_thresholds = waste_thresholds or {
-            "hard_blur": 0.018,
-            "soft_blur": 0.045,
-            "bad_exposure": 0.12,
-            "very_low_score": 0.10,
-            "low_score_no_person": 0.15,
-            "mid_low_score": 0.22,
-        }
         self.feedback_stats: dict[str, int] = {
             "good_overruled_waste": 0,
             "waste_overruled_good": 0,
@@ -51,6 +42,8 @@ class AIEngine:
         }
         self.face_identities: dict[str, list[float]] = {}
         self.image_person_map: dict[str, str] = {}
+        self.confirmed_mappings: dict[str, str] = {}
+        self.person_gallery: dict[str, list[list[float]]] = {}
         self.next_person_id = 1
         self._load_learning_state()
         self._ensure_weight_defaults()
@@ -70,15 +63,36 @@ class AIEngine:
             module = importlib.import_module(f"{package}.{module_info.name}")
             for _, obj in inspect.getmembers(module, inspect.isclass):
                 if issubclass(obj, BasePlugin) and obj is not BasePlugin:
-                    self.plugins.append(obj())
+                    plugin = obj()
+                    pc = self.config.plugins.get(plugin.name)
+                    if pc is not None and not pc.enabled:
+                        logger.info("Plugin %s disabled by config", plugin.name)
+                        continue
+                    self.plugins.append(plugin)
 
         self.plugins.sort(key=lambda p: p.priority)
+        logger.info("Loaded %d plugins: %s", len(self.plugins), [p.name for p in self.plugins])
 
     async def startup(self) -> None:
         await self.scheduler.start()
+        asyncio.create_task(self._preload_plugins())
+
+    async def _preload_plugins(self) -> None:
+        for plugin in self.plugins:
+            if not plugin.is_loaded:
+                try:
+                    await asyncio.to_thread(plugin.load)
+                    logger.info("Plugin %s loaded successfully", plugin.name)
+                except Exception as ex:
+                    logger.warning("Plugin %s preload failed: %s", plugin.name, ex)
 
     async def shutdown(self) -> None:
         await self.scheduler.stop()
+        for plugin in self.plugins:
+            try:
+                plugin.unload()
+            except Exception as ex:
+                logger.warning("Plugin %s unload failed: %s", plugin.name, ex)
         self._save_learning_state()
 
     async def analyze(self, image_path: str) -> dict:
@@ -90,11 +104,19 @@ class AIEngine:
         if image is None:
             raise ValueError(f"Unsupported image or decode failed: {image_path}")
 
-        plugin_outputs: list[PluginOutput] = []
-        for plugin in self.plugins:
-            output = await self.scheduler.submit(plugin.requires_gpu, plugin.analyze, image_path, image)
-            plugin_outputs.append(output)
+        return await self._analyze_with_image(image_path, image)
 
+    async def _analyze_with_image(self, image_path: str, image: np.ndarray) -> dict:
+        tasks = []
+        for plugin in self.plugins:
+            if not plugin.is_loaded:
+                await asyncio.to_thread(plugin.ensure_loaded)
+            tasks.append(self.scheduler.submit(plugin.requires_gpu, plugin.analyze, image_path, image))
+
+        plugin_outputs = await asyncio.gather(*tasks)
+        return self._compute_result(image_path, image, plugin_outputs)
+
+    def _compute_result(self, image_path: str, image: np.ndarray, plugin_outputs: list[PluginOutput]) -> dict:
         sharpness_score = self._estimate_sharpness(image)
         exposure_score = self._estimate_exposure(image)
         yolo_score = self._find_plugin_score(plugin_outputs, "yolo")
@@ -105,7 +127,7 @@ class AIEngine:
         color_label = self._extract_feature_str(plugin_outputs, "curation", "color_label", default="unknown")
         dominant_colors = self._extract_feature_list(plugin_outputs, "curation", "dominant_colors", default=[])
         phash = self._perceptual_hash(image)
-        person_label = self._resolve_person_label(face_signature, person_count, phash)
+        person_label = self._resolve_person_label(face_signature, person_count, phash, image_path)
 
         person_score = min(1.0, person_count / 2.0)
         overall_score = (
@@ -126,6 +148,9 @@ class AIEngine:
 
         auto_class = self._auto_classify(person_count, style_label, sharpness_score, is_waste)
 
+        composition_score = self._find_plugin_score(plugin_outputs, "composition")
+        exposure_quality = self._find_plugin_score(plugin_outputs, "exposure")
+
         return {
             "image_path": image_path,
             "overall_score": round(float(overall_score), 4),
@@ -141,6 +166,8 @@ class AIEngine:
             "auto_class": auto_class,
             "is_waste": is_waste,
             "waste_reason": waste_reason,
+            "composition_score": round(float(composition_score), 4),
+            "exposure_quality": round(float(exposure_quality), 4),
             "plugins": [
                 {
                     "plugin_name": out.plugin_name,
@@ -153,20 +180,58 @@ class AIEngine:
         }
 
     async def analyze_many(self, image_paths: list[str]) -> list[dict]:
-        semaphore = asyncio.Semaphore(self.batch_parallelism)
+        images: list[np.ndarray | None] = []
+        for path in image_paths:
+            try:
+                images.append(cv2.imread(path))
+            except Exception:
+                images.append(None)
 
-        async def _run(path: str) -> dict:
-            async with semaphore:
-                return await self.analyze(path)
+        valid = [(p, img) for p, img in zip(image_paths, images) if img is not None]
+        if not valid:
+            return []
 
-        return await asyncio.gather(*[_run(path) for path in image_paths])
+        valid_paths, valid_images = zip(*valid)
 
-    def apply_feedback(
-        self,
-        manual_tag: str,
-        predicted_is_waste: bool,
-        predicted_face_count: int,
-    ) -> dict:
+        per_image_outputs: dict[str, list[PluginOutput]] = {p: [] for p in valid_paths}
+
+        for plugin in self.plugins:
+            if not plugin.is_loaded:
+                try:
+                    await asyncio.to_thread(plugin.ensure_loaded)
+                except Exception as ex:
+                    logger.warning("Plugin %s failed to load: %s", plugin.name, ex)
+                    continue
+
+            if hasattr(plugin, "analyze_batch") and callable(plugin.analyze_batch):
+                try:
+                    items = list(zip(valid_paths, valid_images))
+                    outputs = await asyncio.to_thread(plugin.analyze_batch, items)
+                    for path, out in zip(valid_paths, outputs):
+                        per_image_outputs[path].append(out)
+                except Exception as ex:
+                    logger.warning("Plugin %s batch failed, fallback to per-image: %s", plugin.name, ex)
+                    for path, img in zip(valid_paths, valid_images):
+                        try:
+                            out = await self.scheduler.submit(plugin.requires_gpu, plugin.analyze, path, img)
+                            per_image_outputs[path].append(out)
+                        except Exception:
+                            pass
+            else:
+                semaphore = asyncio.Semaphore(self.batch_parallelism)
+
+                async def _run_plugin(p: str, img: np.ndarray, pl: BasePlugin) -> PluginOutput:
+                    async with semaphore:
+                        return await self.scheduler.submit(pl.requires_gpu, pl.analyze, p, img)
+
+                tasks = [_run_plugin(p, img, plugin) for p, img in zip(valid_paths, valid_images)]
+                outputs = await asyncio.gather(*tasks)
+                for path, out in zip(valid_paths, outputs):
+                    per_image_outputs[path].append(out)
+
+        return [self._compute_result(p, img, per_image_outputs[p]) for p, img in zip(valid_paths, valid_images)]
+
+    def apply_feedback(self, manual_tag: str, predicted_is_waste: bool, predicted_face_count: int) -> dict:
         tag = manual_tag.lower().strip()
         if tag == "good" and predicted_is_waste:
             self.feedback_stats["good_overruled_waste"] += 1
@@ -253,16 +318,8 @@ class AIEngine:
     def _clamp(value: float, min_val: float, max_val: float) -> float:
         return max(min_val, min(max_val, value))
 
-    def _is_waste(
-        self,
-        sharpness_score: float,
-        exposure_score: float,
-        person_count: int,
-        overall_score: float,
-    ) -> tuple[bool, str]:
+    def _is_waste(self, sharpness_score: float, exposure_score: float, person_count: int, overall_score: float) -> tuple[bool, str]:
         reasons: list[str] = []
-
-        # Weighted risk avoids large false-positive waste outputs.
         risk = 0.0
 
         if sharpness_score < self.waste_thresholds["hard_blur"]:
@@ -287,7 +344,6 @@ class AIEngine:
             reasons.append("no_person_low_score")
             risk += 0.25
 
-        # Portraits are less likely to be true waste unless clearly broken.
         if person_count > 0:
             risk -= 0.15
 
@@ -317,9 +373,14 @@ class AIEngine:
             self.feedback_stats.update(state.get("feedback_stats", {}))
             self.face_identities.update(state.get("face_identities", {}))
             self.image_person_map.update(state.get("image_person_map", {}))
+            self.confirmed_mappings.update(state.get("confirmed_mappings", {}))
+            raw_gallery = state.get("person_gallery", {})
+            for k, v in raw_gallery.items():
+                if isinstance(v, list):
+                    self.person_gallery[k] = [list(e) for e in v if isinstance(e, list)]
             self.next_person_id = int(state.get("next_person_id", self.next_person_id))
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.warning("Failed to load learning state: %s", ex)
 
     def _ensure_weight_defaults(self) -> None:
         defaults = {
@@ -329,11 +390,8 @@ class AIEngine:
             "person": 0.18,
             "style": 0.06,
         }
-
-        # Backward-compat for historical config key.
         if "face" in self.score_weights and "person" not in self.score_weights:
             self.score_weights["person"] = self.score_weights["face"]
-
         for key, val in defaults.items():
             self.score_weights.setdefault(key, val)
 
@@ -344,14 +402,26 @@ class AIEngine:
             "feedback_stats": self.feedback_stats,
             "face_identities": self.face_identities,
             "image_person_map": self.image_person_map,
+            "confirmed_mappings": self.confirmed_mappings,
+            "person_gallery": {k: [list(e) for e in v] for k, v in self.person_gallery.items()},
             "next_person_id": self.next_person_id,
         }
         try:
             self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as ex:
+            logger.warning("Failed to save learning state: %s", ex)
 
-    def _resolve_person_label(self, face_signature: list, person_count: int, phash: str) -> str:
+    def _resolve_person_label(self, face_signature: list, person_count: int, phash: str, image_path: str = "") -> str:
+        if not face_signature or person_count <= 0:
+            if phash and phash in self.image_person_map:
+                return self.image_person_map[phash]
+            return "none"
+
+        # Check confirmed mappings first (user-verified, highest priority)
+        if phash and phash in self.confirmed_mappings:
+            return self.confirmed_mappings[phash]
+
+        # Check phash cache
         if phash:
             if phash in self.image_person_map:
                 return self.image_person_map[phash]
@@ -359,44 +429,80 @@ class AIEngine:
             if near is not None:
                 return self.image_person_map[near]
 
-        if person_count <= 0 or not face_signature:
-            return "none"
-
         try:
             query = np.asarray(face_signature, dtype=np.float32)
         except Exception:
             return "none"
 
+        # Multi-gallery matching: compare against person_gallery (each person has multiple reference embeddings)
         best_label = ""
         best_sim = -1.0
-        for label, vector in self.face_identities.items():
-            try:
-                base = np.asarray(vector, dtype=np.float32)
-            except Exception:
-                continue
-            if base.size != query.size:
-                continue
+        for label, embeddings in self.person_gallery.items():
+            for emb in embeddings:
+                try:
+                    base = np.asarray(emb, dtype=np.float32)
+                except Exception:
+                    continue
+                if base.size != query.size:
+                    continue
+                denom = (np.linalg.norm(base) * np.linalg.norm(query)) + 1e-8
+                sim = float(np.dot(base, query) / denom)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_label = label
 
-            denom = (np.linalg.norm(base) * np.linalg.norm(query)) + 1e-8
-            sim = float(np.dot(base, query) / denom)
-            if sim > best_sim:
-                best_sim = sim
-                best_label = label
+        # Fallback to single-vector face_identities
+        if best_label == "" or best_sim < 0.5:
+            for label, vector in self.face_identities.items():
+                try:
+                    base = np.asarray(vector, dtype=np.float32)
+                except Exception:
+                    continue
+                if base.size != query.size:
+                    continue
+                denom = (np.linalg.norm(base) * np.linalg.norm(query)) + 1e-8
+                sim = float(np.dot(base, query) / denom)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_label = label
 
-        if best_label and best_sim >= 0.88:
-            prev = np.asarray(self.face_identities[best_label], dtype=np.float32)
+        # Multi-frame confirmation: require consistent match across multiple images
+        if best_label and best_sim >= 0.82:
+            prev = np.asarray(self.face_identities.get(best_label, query), dtype=np.float32)
             merged = (prev * 0.75) + (query * 0.25)
             self.face_identities[best_label] = merged.tolist()
             if phash:
                 self.image_person_map[phash] = best_label
+            self._add_to_gallery(best_label, query.tolist())
             return best_label
 
+        # High-confidence match with lower threshold for confirmed identities
+        if best_label and best_sim >= 0.60 and best_label in self.confirmed_mappings.values():
+            prev = np.asarray(self.face_identities.get(best_label, query), dtype=np.float32)
+            merged = (prev * 0.75) + (query * 0.25)
+            self.face_identities[best_label] = merged.tolist()
+            if phash:
+                self.image_person_map[phash] = best_label
+            self._add_to_gallery(best_label, query.tolist())
+            return best_label
+
+        # No match: create new identity
         new_label = f"person_{self.next_person_id}"
         self.next_person_id += 1
         self.face_identities[new_label] = query.tolist()
         if phash:
             self.image_person_map[phash] = new_label
+        self._add_to_gallery(new_label, query.tolist())
         return new_label
+
+    def _add_to_gallery(self, label: str, embedding: list[float]) -> None:
+        if label not in self.person_gallery:
+            self.person_gallery[label] = []
+        gallery = self.person_gallery[label]
+        max_gallery = 5
+        if len(gallery) >= max_gallery:
+            gallery.pop(0)
+        gallery.append(embedding)
 
     def rename_person(self, old_label: str, new_label: str) -> dict:
         old = (old_label or "").strip()
@@ -408,19 +514,28 @@ class AIEngine:
 
         if old in self.face_identities:
             vector = self.face_identities.pop(old)
+            gallery = self.person_gallery.pop(old, [])
+
             if new in self.face_identities:
                 prev = np.asarray(self.face_identities[new], dtype=np.float32)
                 incoming = np.asarray(vector, dtype=np.float32)
                 merged = (prev * 0.6) + (incoming * 0.4)
                 self.face_identities[new] = merged.tolist()
+                # Merge galleries
+                existing_gallery = self.person_gallery.get(new, [])
+                self.person_gallery[new] = (existing_gallery + gallery)[:5]
                 status = "merged"
             else:
                 self.face_identities[new] = vector
+                self.person_gallery[new] = gallery
                 status = "renamed"
+
             if self.image_person_map:
                 for key, val in list(self.image_person_map.items()):
                     if val == old:
                         self.image_person_map[key] = new
+            if old in self.confirmed_mappings:
+                del self.confirmed_mappings[old]
             self._save_learning_state()
             return {"status": status, "label": new}
 
@@ -431,6 +546,7 @@ class AIEngine:
         if not label:
             return {"status": "ignored", "reason": "empty_label"}
 
+        # Mark as confirmed mapping
         image = cv2.imread(str(image_path))
         if image is None:
             return {"status": "error", "reason": "decode_failed"}
@@ -438,8 +554,9 @@ class AIEngine:
         phash = self._perceptual_hash(image)
         if phash:
             self.image_person_map[phash] = label
+            self.confirmed_mappings[phash] = label
 
-        face_signature = []
+        face_signature: list[float] = []
         for plugin in self.plugins:
             if getattr(plugin, "name", "") == "yolo":
                 try:
@@ -458,6 +575,7 @@ class AIEngine:
                     self.face_identities[label] = merged.tolist()
                 else:
                     self.face_identities[label] = query.tolist()
+                self._add_to_gallery(label, query.tolist())
             except Exception:
                 pass
 

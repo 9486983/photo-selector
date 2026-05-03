@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
+
+from core.model_registry import ModelRegistry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -15,7 +21,7 @@ class _WorkItem:
 
 class GpuCpuScheduler:
     def __init__(self, gpu_workers: int = 1, cpu_workers: int = 4) -> None:
-        self._gpu_workers = max(1, gpu_workers)
+        self._gpu_workers = max(0, gpu_workers)
         self._cpu_workers = max(1, cpu_workers)
         self._gpu_queue: asyncio.Queue[_WorkItem] = asyncio.Queue()
         self._cpu_queue: asyncio.Queue[_WorkItem] = asyncio.Queue()
@@ -29,6 +35,7 @@ class GpuCpuScheduler:
             "cpu_queue": self._cpu_queue.qsize(),
             "gpu_workers": self._gpu_workers,
             "cpu_workers": self._cpu_workers,
+            "total_gpu_memory_mb": int(ModelRegistry.total_gpu_memory_mb()),
         }
 
     async def start(self) -> None:
@@ -39,6 +46,11 @@ class GpuCpuScheduler:
             self._worker_tasks.append(asyncio.create_task(self._worker(self._gpu_queue)))
         for _ in range(self._cpu_workers):
             self._worker_tasks.append(asyncio.create_task(self._worker(self._cpu_queue)))
+        logger.info(
+            "Scheduler started: %d GPU workers, %d CPU workers",
+            self._gpu_workers,
+            self._cpu_workers,
+        )
 
     async def stop(self) -> None:
         if not self._started:
@@ -48,10 +60,15 @@ class GpuCpuScheduler:
             task.cancel()
         await asyncio.gather(*self._worker_tasks, return_exceptions=True)
         self._worker_tasks.clear()
+        logger.info("Scheduler stopped")
 
     async def submit(self, requires_gpu: bool, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         if not self._started:
             await self.start()
+
+        if requires_gpu and self._gpu_workers == 0:
+            logger.debug("GPU not available, routing %s to CPU queue", getattr(fn, "__name__", "?"))
+            requires_gpu = False
 
         loop = asyncio.get_running_loop()
         future = loop.create_future()

@@ -64,6 +64,8 @@ public sealed class AnalysisCoordinator(IAiServiceClient aiClient)
             AutoClass = response.AutoClass,
             IsWaste = response.IsWaste,
             WasteReason = response.WasteReason,
+            CompositionScore = response.CompositionScore,
+            ExposureQuality = response.ExposureQuality,
             Rating = existingRating,
             PluginResults = response.Results,
             RawJson = response.RawJson

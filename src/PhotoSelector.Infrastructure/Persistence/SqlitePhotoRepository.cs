@@ -133,7 +133,7 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
 
         var analysisCmd = connection.CreateCommand();
         analysisCmd.CommandText = """
-            SELECT ImageId, OverallScore, SharpnessScore, ExposureScore, EyesClosed, IsDuplicate, IsAnalyzed, FaceCount, PersonLabel, StyleLabel, ColorLabel, DominantColorsJson, AutoClass, IsWaste, WasteReason, Rating, IsPicked, RotationQuarterTurns, RawJson
+            SELECT ImageId, OverallScore, SharpnessScore, ExposureScore, EyesClosed, IsDuplicate, IsAnalyzed, FaceCount, PersonLabel, StyleLabel, ColorLabel, DominantColorsJson, AutoClass, IsWaste, WasteReason, Rating, IsPicked, RotationQuarterTurns, RawJson, CompositionScore, ExposureQuality
             FROM Analysis;
             """;
         await using (var reader = await analysisCmd.ExecuteReaderAsync(cancellationToken))
@@ -165,7 +165,9 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
                     Rating = reader.IsDBNull(15) ? 0 : reader.GetInt32(15),
                     IsPicked = !reader.IsDBNull(16) && reader.GetInt32(16) == 1,
                     RotationQuarterTurns = reader.IsDBNull(17) ? 0 : NormalizeQuarterTurns(reader.GetInt32(17)),
-                    RawJson = reader.IsDBNull(18) ? string.Empty : reader.GetString(18)
+                    RawJson = reader.IsDBNull(18) ? string.Empty : reader.GetString(18),
+                    CompositionScore = reader.IsDBNull(19) ? 0 : (float)reader.GetDouble(19),
+                    ExposureQuality = reader.IsDBNull(20) ? 0 : (float)reader.GetDouble(20),
                 };
             }
         }
@@ -252,8 +254,8 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
         var cmd = connection.CreateCommand();
         cmd.Transaction = (SqliteTransaction)tx;
         cmd.CommandText = """
-            INSERT INTO Analysis(ImageId, OverallScore, SharpnessScore, ExposureScore, EyesClosed, IsDuplicate, IsAnalyzed, FaceCount, PersonLabel, StyleLabel, ColorLabel, DominantColorsJson, AutoClass, IsWaste, WasteReason, Rating, IsPicked, RotationQuarterTurns, RawJson)
-            VALUES ($id, $overall, $sharpness, $exposure, $eyesClosed, $duplicate, $isAnalyzed, $faceCount, $personLabel, $styleLabel, $colorLabel, $dominantColorsJson, $autoClass, $isWaste, $wasteReason, $rating, $isPicked, $rotationQuarterTurns, $rawJson)
+            INSERT INTO Analysis(ImageId, OverallScore, SharpnessScore, ExposureScore, EyesClosed, IsDuplicate, IsAnalyzed, FaceCount, PersonLabel, StyleLabel, ColorLabel, DominantColorsJson, AutoClass, IsWaste, WasteReason, Rating, IsPicked, RotationQuarterTurns, RawJson, CompositionScore, ExposureQuality)
+            VALUES ($id, $overall, $sharpness, $exposure, $eyesClosed, $duplicate, $isAnalyzed, $faceCount, $personLabel, $styleLabel, $colorLabel, $dominantColorsJson, $autoClass, $isWaste, $wasteReason, $rating, $isPicked, $rotationQuarterTurns, $rawJson, $compositionScore, $exposureQuality)
             ON CONFLICT(ImageId) DO UPDATE SET
                 OverallScore = excluded.OverallScore,
                 SharpnessScore = excluded.SharpnessScore,
@@ -272,7 +274,9 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
                 Rating = excluded.Rating,
                 IsPicked = excluded.IsPicked,
                 RotationQuarterTurns = excluded.RotationQuarterTurns,
-                RawJson = excluded.RawJson;
+                RawJson = excluded.RawJson,
+                CompositionScore = excluded.CompositionScore,
+                ExposureQuality = excluded.ExposureQuality;
             """;
         cmd.Parameters.AddWithValue("$id", photo.Id.ToString());
         cmd.Parameters.AddWithValue("$overall", photo.Analysis.OverallScore);
@@ -293,6 +297,8 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
         cmd.Parameters.AddWithValue("$isPicked", photo.Analysis.IsPicked ? 1 : 0);
         cmd.Parameters.AddWithValue("$rotationQuarterTurns", NormalizeQuarterTurns(photo.Analysis.RotationQuarterTurns));
         cmd.Parameters.AddWithValue("$rawJson", photo.Analysis.RawJson);
+        cmd.Parameters.AddWithValue("$compositionScore", photo.Analysis.CompositionScore);
+        cmd.Parameters.AddWithValue("$exposureQuality", photo.Analysis.ExposureQuality);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
 
         var deleteCmd = connection.CreateCommand();
@@ -400,6 +406,8 @@ public sealed class SqlitePhotoRepository : IPhotoRepository
         EnsureColumn(connection, "Analysis", "Rating", "INTEGER");
         EnsureColumn(connection, "Analysis", "IsPicked", "INTEGER");
         EnsureColumn(connection, "Analysis", "RotationQuarterTurns", "INTEGER");
+        EnsureColumn(connection, "Analysis", "CompositionScore", "REAL");
+        EnsureColumn(connection, "Analysis", "ExposureQuality", "REAL");
     }
 
     private static void EnsureColumn(SqliteConnection connection, string table, string column, string columnType)

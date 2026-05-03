@@ -17,6 +17,8 @@ public sealed class AnalyzeResponse
     public string AutoClass { get; set; } = "unknown";
     public bool IsWaste { get; set; }
     public string WasteReason { get; set; } = string.Empty;
+    public float CompositionScore { get; set; }
+    public float ExposureQuality { get; set; }
     public List<PluginResult> Results { get; set; } = new();
     public string RawJson { get; set; } = string.Empty;
 }

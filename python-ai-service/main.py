@@ -1,10 +1,19 @@
 import json
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from core.config import load_config
 from core.engine import AIEngine
+from core.model_registry import ModelRegistry
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 def _load_settings() -> dict:
@@ -14,31 +23,21 @@ def _load_settings() -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-settings = _load_settings()
-engine_cfg = settings.get("engine", {})
-
-
 def _gpu_available() -> bool:
     try:
         import torch
-
         return torch.cuda.is_available()
     except Exception:
         return False
 
 
-gpu_available = _gpu_available()
-default_gpu_workers = 2 if gpu_available else 1
-default_cpu_workers = 6 if gpu_available else 4
-default_batch_parallelism = 10 if gpu_available else 6
+settings = _load_settings()
+engine_cfg = settings.get("engine", {})
 
-engine = AIEngine(
-    gpu_workers=int(engine_cfg.get("gpu_workers", default_gpu_workers)),
-    cpu_workers=int(engine_cfg.get("cpu_workers", default_cpu_workers)),
-    batch_parallelism=int(engine_cfg.get("batch_parallelism", default_batch_parallelism)),
-    score_weights=engine_cfg.get("score_weights", {}),
-    waste_thresholds=engine_cfg.get("waste_thresholds", {}),
-)
+gpu_available = _gpu_available()
+config = load_config()
+
+engine = AIEngine(config=config)
 app = FastAPI(title="PhotoSelector AI Service", version="3.2.0")
 
 
@@ -73,11 +72,13 @@ class PersonAssignRequest(BaseModel):
 async def startup() -> None:
     engine.load_plugins()
     await engine.startup()
+    logger.info("Started with %d plugins: %s", len(engine.plugins), engine.plugin_names)
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
     await engine.shutdown()
+    logger.info("Engine shutdown complete")
 
 
 @app.get("/health")
@@ -86,6 +87,19 @@ async def health() -> dict:
         "status": "ok",
         "plugins": engine.plugin_names,
         "scheduler": engine.scheduler.queue_stats,
+        "models": ModelRegistry.get_status(),
+    }
+
+
+@app.get("/loading/progress")
+async def loading_progress() -> dict:
+    statuses = ModelRegistry.get_status()
+    total = len(statuses)
+    loaded = sum(1 for s in statuses if s["loaded"])
+    return {
+        "total": total,
+        "loaded": loaded,
+        "models": statuses,
     }
 
 
@@ -96,6 +110,7 @@ async def analyze(req: AnalyzeRequest) -> dict:
     except FileNotFoundError as ex:
         raise HTTPException(status_code=404, detail=str(ex)) from ex
     except Exception as ex:
+        logger.exception("Analyze failed for %s", req.image_path)
         raise HTTPException(status_code=500, detail=f"Analyze failed: {ex}") from ex
 
 
@@ -103,13 +118,13 @@ async def analyze(req: AnalyzeRequest) -> dict:
 async def analyze_batch(req: AnalyzeBatchRequest) -> dict:
     if not req.image_paths:
         return {"items": []}
-
     try:
         items = await engine.analyze_many(req.image_paths)
         return {"items": items}
     except FileNotFoundError as ex:
         raise HTTPException(status_code=404, detail=str(ex)) from ex
     except Exception as ex:
+        logger.exception("Batch analyze failed")
         raise HTTPException(status_code=500, detail=f"Batch analyze failed: {ex}") from ex
 
 
@@ -127,6 +142,7 @@ async def feedback(req: FeedbackRequest) -> dict:
             "learning_state": learning_state,
         }
     except Exception as ex:
+        logger.exception("Feedback failed")
         raise HTTPException(status_code=500, detail=f"Feedback failed: {ex}") from ex
 
 
@@ -136,6 +152,7 @@ async def rename_person(req: PersonRenameRequest) -> dict:
         result = engine.rename_person(req.old_label, req.new_label)
         return {"status": "ok", "result": result}
     except Exception as ex:
+        logger.exception("Rename failed")
         raise HTTPException(status_code=500, detail=f"Rename failed: {ex}") from ex
 
 
@@ -145,4 +162,5 @@ async def assign_person(req: PersonAssignRequest) -> dict:
         result = engine.assign_person(req.image_path, req.new_label)
         return {"status": "ok", "result": result}
     except Exception as ex:
+        logger.exception("Assign failed")
         raise HTTPException(status_code=500, detail=f"Assign failed: {ex}") from ex
