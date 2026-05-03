@@ -79,8 +79,8 @@ class CompositionPlugin(BasePlugin):
     @staticmethod
     def _rule_of_thirds(image: np.ndarray, gray: np.ndarray, w: int, h: int) -> tuple[float, float]:
         """Evaluate how well the subject aligns with rule-of-thirds grid lines."""
-        third_x = w / 3
-        third_y = h / 3
+        third_x = w // 3
+        third_y = h // 3
 
         # Use edge detection + saliency to find main subject regions
         edges = cv2.Canny(gray, 50, 150)
